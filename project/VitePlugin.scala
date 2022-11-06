@@ -1,3 +1,5 @@
+import java.nio.file.Files
+
 import org.apache.commons.io.FileUtils
 import org.scalajs.sbtplugin.ScalaJSPlugin
 import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.fastLinkJS
@@ -18,6 +20,7 @@ import sbt.nio.Keys.watchOnIteration
 import sbt.nio.Keys.watchOnTermination
 
 import scala.collection.immutable.ListSet
+import scala.jdk.CollectionConverters._
 import scala.sys.process.ProcessLogger
 import scala.sys.process.{Process => ScalaProcess}
 
@@ -26,6 +29,7 @@ object VitePlugin extends AutoPlugin {
   override def requires = ScalaJSPlugin
 
   object autoImport {
+    val viteCopyResources: TaskKey[Unit] = taskKey[Unit]("")
     val viteInstall: TaskKey[Unit] =
       taskKey[Unit](
         "Copies over resources to target directory and runs `npm install`"
@@ -91,13 +95,56 @@ object VitePlugin extends AutoPlugin {
         "vite" /
         (if (configuration.value == Compile) "main" else "test")
     },
-    viteInstall := {
+    viteCopyResources := {
       val s = streams.value
 
       val targetDir = (viteInstall / crossTarget).value
 
-      // TODO do this separately with caching
-      FileUtils.copyDirectory(baseDirectory.value / "vite", targetDir)
+      def copyChanges(directory: File): Unit = {
+        s.log.debug(s"walking ${directory.getAbsolutePath}")
+        Files
+          .walk(directory.toPath)
+          .iterator()
+          .asScala
+          .map(_.toFile)
+          .filter(file => file.getAbsolutePath != directory.getAbsolutePath)
+          .foreach { file =>
+            if (file.isDirectory) {
+              copyChanges(file)
+            } else {
+              val targetFile = new File(
+                file.getAbsolutePath.replace(
+                  (baseDirectory.value / "vite").getAbsolutePath,
+                  targetDir.getAbsolutePath
+                )
+              )
+              if (!Hash(file).sameElements(Hash(targetFile))) {
+                s.log.debug(
+                  s"File changed [${file.getAbsolutePath}], copying [${targetFile.getAbsolutePath}]"
+                )
+                IO.copyFile(
+                  file,
+                  targetFile
+                )
+                true
+              } else {
+                s.log.debug(s"File not changed [${file.getAbsolutePath}]")
+                false
+              }
+            }
+          }
+      }
+      copyChanges(baseDirectory.value / "vite")
+    },
+    watchSources := (watchSources.value ++ Seq(
+      Watched.WatchSource(baseDirectory.value / "vite")
+    )),
+    viteInstall := {
+      viteCopyResources.value
+
+      val s = streams.value
+
+      val targetDir = (viteInstall / crossTarget).value
 
       val lockFile = "package-lock.json"
 
