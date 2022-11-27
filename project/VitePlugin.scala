@@ -38,9 +38,16 @@ object VitePlugin extends AutoPlugin {
       taskKey[Unit](
         "Compiles module and copies output to target directory."
       )
-    val viteDev = taskKey[Unit]("Runs `vite` on target directory.")
+
+    val startVite = taskKey[Unit]("Runs `vite` on target directory.")
+    val stopVite = taskKey[Unit]("Stops running `vite` on target directory.")
+
     val viteBuild = taskKey[Unit]("Runs `vite build` on target directory.")
-    val vitePreview = taskKey[Unit]("Runs `vite preview` on target directory.")
+
+    val startVitePreview =
+      taskKey[Unit]("Runs `vite preview` on target directory.")
+    val stopVitePreview =
+      taskKey[Unit]("Stops running `vite preview` on target directory.")
   }
 
   import autoImport._
@@ -84,6 +91,68 @@ object VitePlugin extends AutoPlugin {
       val stdoutThread: Thread,
       val stderrThread: Thread
   )
+
+  private def viteTask(
+      start: TaskKey[Unit],
+      stop: TaskKey[Unit],
+      command: String
+  ) = {
+    var processWrapper: Option[ProcessWrapper] = None
+
+    def terminateProcess() = {
+      processWrapper.foreach { processWrapper =>
+        processWrapper.stdoutThread.interrupt()
+        processWrapper.stderrThread.interrupt()
+        // TODO consider using reflection to keep JDK 8 compatibility
+        processWrapper.process
+          .descendants() // requires JDK 9+
+          .forEach(process => process.destroy())
+        processWrapper.process.destroy()
+      }
+      processWrapper = None
+    }
+
+    Seq(
+      start := {
+        val logger = state.value.globalLogging.full
+        logger.info("Starting Vite")
+
+        stopVite.value
+
+        viteCompile.value
+
+        val targetDir = (viteInstall / crossTarget).value
+
+        // using Java Process to use `descendants`
+        val pb =
+          new ProcessBuilder(cmd("npm") ::: "run" :: command :: Nil: _*)
+        pb.directory(targetDir)
+        val p = pb.start()
+        val stdoutThread = new Thread() {
+          override def run(): Unit = {
+            scala.io.Source
+              .fromInputStream(p.getInputStream)
+              .getLines
+              .foreach(msg => logger.info(msg))
+          }
+        }
+        stdoutThread.start()
+        val stderrThread = new Thread() {
+          override def run(): Unit = {
+            scala.io.Source
+              .fromInputStream(p.getErrorStream)
+              .getLines
+              .foreach(msg => logger.error(msg))
+          }
+        }
+        stderrThread.start()
+        processWrapper = Some(new ProcessWrapper(p, stdoutThread, stderrThread))
+      },
+      stop := {
+        terminateProcess()
+      }
+    )
+  }
 
   override lazy val projectSettings: Seq[Setting[_]] =
     inConfig(Compile)(perConfigSettings) ++
@@ -191,84 +260,16 @@ object VitePlugin extends AutoPlugin {
       ScalaProcess(cmd("npm") ::: "run" :: "build" :: Nil, targetDir)
         .run(eagerLogger(logger))
         .exitValue()
-    },
-    vitePreview := {
-      val logger = state.value.globalLogging.full
-
-      val targetDir = (viteInstall / crossTarget).value
-
-      ScalaProcess(cmd("npm") ::: "run" :: "preview" :: Nil, targetDir)
-        .run(eagerLogger(logger))
-        .exitValue()
     }
     // TODO figure out what makes sense here, might need to run viteBuild instead of just compile
-//    (Compile / compile) := ((Compile / compile) dependsOn viteCompile).value
-  ) ++ {
-    var watch: Boolean = false
-    var processWrapper: Option[ProcessWrapper] = None
-    def terminateProcess() = {
-      processWrapper.foreach { processWrapper =>
-        processWrapper.stdoutThread.interrupt()
-        processWrapper.stderrThread.interrupt()
-        // TODO consider using reflection to keep JDK 8 compatibility
-        processWrapper.process
-          .descendants() // requires JDK 9+
-          .forEach(process => process.destroy())
-        processWrapper.process.destroy()
-      }
-    }
-    Seq(
-      viteDev / watchBeforeCommand := { () =>
-        {
-          watch = true
-        }
-      },
-      viteDev := {
-        viteCompile.value
-
-        val logger = state.value.globalLogging.full
-
-        val targetDir = (viteInstall / crossTarget).value
-
-        if (watch) {
-          if (processWrapper.isEmpty) {
-            // using Java Process to use `descendants`
-            val pb =
-              new ProcessBuilder(cmd("npm") ::: "run" :: "dev" :: Nil: _*)
-            pb.directory(targetDir)
-            val p = pb.start()
-            val stdoutThread = new Thread() {
-              override def run(): Unit = {
-                scala.io.Source
-                  .fromInputStream(p.getInputStream)
-                  .getLines
-                  .foreach(msg => logger.info(msg))
-              }
-            }
-            stdoutThread.start()
-            val stderrThread = new Thread() {
-              override def run(): Unit = {
-                scala.io.Source
-                  .fromInputStream(p.getErrorStream)
-                  .getLines
-                  .foreach(msg => logger.error(msg))
-              }
-            }
-            stderrThread.start()
-            processWrapper =
-              Some(new ProcessWrapper(p, stdoutThread, stderrThread))
-          }
-        } else {
-          ScalaProcess(cmd("npm") ::: "run" :: "dev" :: Nil, targetDir)
-            .run(eagerLogger(logger))
-            .exitValue()
-        }
-      },
-      viteDev / watchOnTermination := { (_, _, _, s) =>
-        terminateProcess()
-        watch = false
-        s
-      }
-    )
-  }
+    // (Compile / compile) := ((Compile / compile) dependsOn viteCompile).value
+  ) ++ viteTask(
+    startVite,
+    stopVite,
+    "dev"
+  ) ++ viteTask(
+    startVitePreview,
+    stopVitePreview,
+    "preview"
+  )
 }
