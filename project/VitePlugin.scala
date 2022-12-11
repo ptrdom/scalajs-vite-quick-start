@@ -1,25 +1,15 @@
 import java.nio.file.Files
 
-import org.apache.commons.io.FileUtils
+import org.scalajs.linker.interface.Report
 import org.scalajs.sbtplugin.ScalaJSPlugin
 import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.fastLinkJS
 import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.fullLinkJS
 import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.scalaJSLinkerOutputDirectory
-import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.scalaJSStage
-import org.scalajs.sbtplugin.Stage
 import sbt.AutoPlugin
-import sbt.Def.Initialize
-import sbt.Def.task
-import sbt.Def.taskDyn
 import sbt.Keys._
-import sbt.Project.projectToRef
 import sbt._
 import sbt.internal.util.ManagedLogger
-import sbt.nio.Keys.watchBeforeCommand
-import sbt.nio.Keys.watchOnIteration
-import sbt.nio.Keys.watchOnTermination
 
-import scala.collection.immutable.ListSet
 import scala.jdk.CollectionConverters._
 import scala.sys.process.ProcessLogger
 import scala.sys.process.{Process => ScalaProcess}
@@ -52,32 +42,16 @@ object VitePlugin extends AutoPlugin {
 
   import autoImport._
 
+  sealed trait Stage
+  object Stage {
+    case object FullOpt extends Stage
+    case object FastOpt extends Stage
+  }
+
   private def cmd(name: String) = sys.props("os.name").toLowerCase match {
     case os if os.contains("win") => "cmd" :: "/c" :: name :: Nil
     case _                        => name :: Nil
   }
-
-  private lazy val scalaJSTaskFiles = onScalaJSStage(
-    Def.task {
-      fastLinkJS.value
-      (fastLinkJS / scalaJSLinkerOutputDirectory).value
-    },
-    Def.task {
-      fullLinkJS.value
-      (fullLinkJS / scalaJSLinkerOutputDirectory).value
-    }
-  )
-
-  private def onScalaJSStage[A](
-      onFastOpt: => Initialize[A],
-      onFullOpt: => Initialize[A]
-  ): Initialize[A] =
-    Def.settingDyn {
-      scalaJSStage.value match {
-        case Stage.FastOpt => onFastOpt
-        case Stage.FullOpt => onFullOpt
-      }
-    }
 
   private def eagerLogger(log: ManagedLogger) = {
     ProcessLogger(
@@ -93,6 +67,7 @@ object VitePlugin extends AutoPlugin {
   )
 
   private def viteTask(
+      stageTask: TaskKey[sbt.Attributed[Report]],
       start: TaskKey[Unit],
       stop: TaskKey[Unit],
       command: String
@@ -113,13 +88,13 @@ object VitePlugin extends AutoPlugin {
     }
 
     Seq(
-      start := {
+      stageTask / start := {
         val logger = state.value.globalLogging.full
         logger.info("Starting Vite")
 
-        stopVite.value
+        (stageTask / stop).value
 
-        viteCompile.value
+        (stageTask / viteCompile).value
 
         val targetDir = (viteInstall / crossTarget).value
 
@@ -148,7 +123,7 @@ object VitePlugin extends AutoPlugin {
         stderrThread.start()
         processWrapper = Some(new ProcessWrapper(p, stdoutThread, stderrThread))
       },
-      stop := {
+      stageTask / stop := {
         terminateProcess()
       }
     )
@@ -240,36 +215,52 @@ object VitePlugin extends AutoPlugin {
       }(
         Set(baseDirectory.value / "vite" / lockFile)
       )
-    },
-    viteCompile := {
-      viteInstall.value
-
-      val targetDir = (viteInstall / crossTarget).value
-
-      scalaJSTaskFiles.value
-        .listFiles()
-        .foreach(file => IO.copyFile(file, targetDir / file.name))
-    },
-    viteBuild := {
-      viteCompile.value
-
-      val logger = state.value.globalLogging.full
-
-      val targetDir = (viteInstall / crossTarget).value
-
-      ScalaProcess(cmd("npm") ::: "run" :: "build" :: Nil, targetDir)
-        .run(eagerLogger(logger))
-        .exitValue()
     }
-    // TODO figure out what makes sense here, might need to run viteBuild instead of just compile
-    // (Compile / compile) := ((Compile / compile) dependsOn viteCompile).value
-  ) ++ viteTask(
-    startVite,
-    stopVite,
-    "dev"
-  ) ++ viteTask(
-    startVitePreview,
-    stopVitePreview,
-    "preview"
-  )
+  ) ++
+    perScalaJSStageSettings(Stage.FastOpt) ++
+    perScalaJSStageSettings(Stage.FullOpt)
+
+  private def perScalaJSStageSettings(stage: Stage): Seq[Setting[_]] = {
+    val stageTask = stage match {
+      case Stage.FastOpt => fastLinkJS
+      case Stage.FullOpt => fullLinkJS
+    }
+
+    Seq(
+      stageTask / viteCompile := {
+        viteInstall.value
+
+        val targetDir = (viteInstall / crossTarget).value
+
+        stageTask.value
+
+        (stageTask / scalaJSLinkerOutputDirectory).value
+          .listFiles()
+          .foreach(file => IO.copyFile(file, targetDir / file.name))
+      },
+      stageTask / viteBuild := {
+        (stageTask / viteCompile).value
+
+        val logger = state.value.globalLogging.full
+
+        val targetDir = (viteInstall / crossTarget).value
+
+        ScalaProcess(cmd("npm") ::: "run" :: "build" :: Nil, targetDir)
+          .run(eagerLogger(logger))
+          .exitValue()
+      }
+      // TODO figure out what makes sense here, might need to run viteBuild instead of just compile
+      // (Compile / compile) := ((Compile / compile) dependsOn viteCompile).value
+    ) ++ viteTask(
+      stageTask,
+      startVite,
+      stopVite,
+      "dev"
+    ) ++ viteTask(
+      stageTask,
+      startVitePreview,
+      stopVitePreview,
+      "preview"
+    )
+  }
 }
