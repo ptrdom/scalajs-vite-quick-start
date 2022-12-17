@@ -1,6 +1,6 @@
 import org.scalajs.linker.interface.ModuleInitializer
 
-enablePlugins(VitePlugin)
+enablePlugins(ScalaJSVitePlugin)
 
 name := "scalajs-vite-quick-start"
 scalaVersion := "2.13.8"

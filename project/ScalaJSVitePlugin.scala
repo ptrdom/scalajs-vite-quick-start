@@ -14,7 +14,7 @@ import scala.jdk.CollectionConverters._
 import scala.sys.process.ProcessLogger
 import scala.sys.process.{Process => ScalaProcess}
 
-object VitePlugin extends AutoPlugin {
+object ScalaJSVitePlugin extends AutoPlugin {
 
   override def requires = ScalaJSPlugin
 
@@ -74,8 +74,10 @@ object VitePlugin extends AutoPlugin {
   ) = {
     var processWrapper: Option[ProcessWrapper] = None
 
-    def terminateProcess() = {
+    def terminateProcess(log: Logger) = {
       processWrapper.foreach { processWrapper =>
+        log.info(s"Terminating Vite [$command] process")
+
         processWrapper.stdoutThread.interrupt()
         processWrapper.stderrThread.interrupt()
         // TODO consider using reflection to keep JDK 8 compatibility
@@ -97,6 +99,8 @@ object VitePlugin extends AutoPlugin {
         (stageTask / viteCompile).value
 
         val targetDir = (viteInstall / crossTarget).value
+
+        terminateProcess(logger)
 
         // using Java Process to use `descendants`
         val pb =
@@ -124,7 +128,14 @@ object VitePlugin extends AutoPlugin {
         processWrapper = Some(new ProcessWrapper(p, stdoutThread, stderrThread))
       },
       stageTask / stop := {
-        terminateProcess()
+        terminateProcess(streams.value.log)
+      },
+      (onLoad in Global) := {
+        (onLoad in Global).value.compose(
+          _.addExitHook {
+            terminateProcess(Keys.sLog.value)
+          }
+        )
       }
     )
   }
