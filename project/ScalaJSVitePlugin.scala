@@ -2,8 +2,10 @@ import java.nio.file.Files
 
 import org.scalajs.linker.interface.Report
 import org.scalajs.sbtplugin.ScalaJSPlugin
+import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.ModuleKind
 import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.fastLinkJS
 import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.fullLinkJS
+import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.scalaJSLinkerConfig
 import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport.scalaJSLinkerOutputDirectory
 import sbt.AutoPlugin
 import sbt.Keys._
@@ -140,11 +142,16 @@ object ScalaJSVitePlugin extends AutoPlugin {
     )
   }
 
-  override lazy val projectSettings: Seq[Setting[_]] =
+  override lazy val projectSettings: Seq[Setting[_]] = Seq(
+    scalaJSLinkerConfig ~= {
+      _.withModuleKind(ModuleKind.ESModule)
+    }
+  ) ++
     inConfig(Compile)(perConfigSettings) ++
-      inConfig(Test)(perConfigSettings)
+    inConfig(Test)(perConfigSettings)
 
   private lazy val perConfigSettings: Seq[Setting[_]] = Seq(
+    unmanagedSourceDirectories += baseDirectory.value / "vite",
     viteInstall / crossTarget := {
       crossTarget.value /
         "vite" /

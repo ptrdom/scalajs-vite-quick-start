@@ -12,8 +12,3 @@ scalaJSModuleInitializers := Seq(
     .mainMethodWithArgs("quickstart.Main", "main")
     .withModuleID("main")
 )
-scalaJSLinkerConfig ~= {
-  _.withModuleKind(ModuleKind.ESModule)
-}
-
-Compile / unmanagedSourceDirectories += baseDirectory.value / "vite"
